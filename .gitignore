@@ -1,0 +1,46 @@
+# 🚀 General Ignore Files
+.DS_Store
+Thumbs.db
+
+# 🔹 Virtual Environment (Python)
+venv/
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.pdb
+
+# 🔹 Python Dependencies
+Pipfile
+Pipfile.lock
+poetry.lock
+
+# 🔹 Supabase Credentials
+.env
+supabase/.env
+
+# 🔹 Flask Logs & Database Files
+instance/
+*.log
+*.sqlite3
+
+# 🔹 Node.js (Frontend)
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+package-lock.json
+pnpm-lock.yaml
+
+# 🔹 React Build Files
+build/
+dist/
+*.cache
+
+# 🔹 IDE Files
+.vscode/
+.idea/
+*.sublime-workspace
+
+# 🔹 GitHub Actions Workflows (if needed)
+.github/
