@@ -44,3 +44,12 @@ dist/
 
 # 🔹 GitHub Actions Workflows (if needed)
 .github/
+
+
+#backend
+feature_columns.pkl
+ml_model.pkl
+scaler.pkl
+
+#dataset
+dataset/
