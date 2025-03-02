@@ -2,164 +2,101 @@ from flask import Flask, request, jsonify
 import joblib
 import numpy as np
 import pandas as pd
-import logging
-from datetime import datetime
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+import json
 
 app = Flask(__name__)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load the tuned pipeline (which includes preprocessing and the LightGBM classifier)
+model = joblib.load('tuned_model_cicids_lightgbm.pkl')
+# Load the fitted numerical scaler (if you need it separately for any reason)
+scaler = joblib.load('tuned_scaler_cicids.pkl')
+# Load original feature column names for inference
+original_feature_columns = joblib.load('original_feature_columns.pkl')
 
-# Define paths to your model, scaler, and original feature columns
-MODEL_PATH = 'model_cicids.pkl'
-SCALER_PATH = 'scaler_cicids.pkl'
-FEATURE_COLUMNS_PATH = 'original_feature_columns.pkl'
+# Custom threshold for class 3; adjust as needed
+CUSTOM_THRESHOLDS = {3: 0.22}
 
-def load_model_and_scaler():
-    """Helper function to load the model, scaler, and original feature names."""
-    try:
-        model = joblib.load(MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
-        original_feature_columns = joblib.load(FEATURE_COLUMNS_PATH)
-        logger.info("Model, scaler, and feature columns loaded successfully.")
-        return model, scaler, original_feature_columns
-    except Exception as e:
-        logger.error(f"Failed to load model/scaler/feature columns: {e}")
-        return None, None, None
-
-# Load model, scaler, and feature names at startup
-model, scaler, original_feature_columns = load_model_and_scaler()
-if model is None or scaler is None or original_feature_columns is None:
-    logger.error("Exiting application because model/scaler/feature columns could not be loaded.")
-    exit(1)
-
-# Define severity mapping (assuming multiclass output)
-severity_mapping = {
-    0: 'Low',
-    1: 'Medium',
-    2: 'High',
-    3: 'Critical'
-}
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint to ensure API is up."""
-    return jsonify({'status': 'ok', 'message': 'API is healthy.'}), 200
+def custom_predict_with_thresholds(probabilities, thresholds):
+    """
+    Apply custom thresholds for specific classes.
+    By default, predictions are taken as argmax of the probabilities.
+    For each class in thresholds, if the predicted probability is at or above the threshold,
+    the prediction is forced to that class.
+    """
+    adjusted_preds = np.argmax(probabilities, axis=1)
+    for class_label, threshold in thresholds.items():
+        high_confidence = probabilities[:, class_label] >= threshold
+        adjusted_preds[high_confidence] = class_label
+    return adjusted_preds
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    """Endpoint for model inference to detect intrusions."""
+    """
+    Expects a JSON payload with:
+    - timestamp (ISO format string)
+    - source_ip (string)
+    - destination_ip (string)
+    - protocol (string)
+    - features: a list of raw feature values (length should match original_feature_columns)
+    
+    Returns:
+        JSON with predicted severity, probabilities, and alert flag.
+    """
     try:
-        data = request.get_json(force=True)
-        required_fields = ['timestamp', 'source_ip', 'destination_ip', 'protocol', 'features']
-        if not all(field in data for field in required_fields):
-            logger.warning("Missing one or more required fields.")
-            return jsonify({'error': 'Invalid input format, missing fields.'}), 400
+        data = request.get_json()
 
-        # Validate timestamp format
-        try:
-            datetime.fromisoformat(data['timestamp'])
-        except Exception as e:
-            logger.warning(f"Timestamp error: {e}")
-            return jsonify({'error': 'Invalid timestamp format.'}), 400
+        # Validate input keys
+        required_keys = ['timestamp', 'source_ip', 'destination_ip', 'protocol', 'features']
+        if not all(key in data for key in required_keys):
+            return jsonify({"error": "Invalid input format. Missing required keys."}), 400
 
-        # Validate and process features (expecting raw features, e.g., 78 numbers)
-        features = data.get('features')
-        if not isinstance(features, list) or not all(isinstance(x, (int, float)) for x in features):
-            logger.warning("Features are not a valid numeric list.")
-            return jsonify({'error': 'Invalid features format. Must be a list of numbers.'}), 400
+        # Validate feature length
+        features = data['features']
+        if len(features) != len(original_feature_columns):
+            return jsonify({
+                "error": f"Expected {len(original_feature_columns)} features, got {len(features)}."
+            }), 400
 
-        raw_features = np.array(features).reshape(1, -1)
-        expected_feature_count = len(original_feature_columns)
-        if raw_features.shape[1] != expected_feature_count:
-            return jsonify({'error': f'Expected {expected_feature_count} features, got {raw_features.shape[1]}.'}), 400
+        # Create a DataFrame from the incoming features so that the pipeline can process it
+        # The column names must match those used during training.
+        input_df = pd.DataFrame([features], columns=original_feature_columns)
 
-        raw_df = pd.DataFrame(raw_features, columns=original_feature_columns)
+        # If you need to apply any additional transformations (like log transforms) that were applied during training,
+        # make sure they are included in your pipeline. Here we assume that the pipeline handles all transformations.
+        # Predict probabilities
+        y_prob = model.predict_proba(input_df)
+        # Use custom threshold calibration for class 3
+        y_pred = custom_predict_with_thresholds(y_prob, CUSTOM_THRESHOLDS)
 
-        # Get model prediction and probabilities
-        prediction = int(model.predict(raw_df)[0])
-        probabilities = model.predict_proba(raw_df)[0]
-        severity = severity_mapping.get(prediction, 'Unknown')
-        alert = severity in ['High', 'Critical']
+        # Map prediction to severity label (0: Low, 1: Medium, 2: High, 3: Critical)
+        severity_mapping = {0: "Low", 1: "Medium", 2: "High", 3: "Critical"}
+        severity_label = severity_mapping.get(int(y_pred[0]), "Unknown")
 
+        # Optionally, define an alert flag (for example, alert if severity is High or Critical)
+        alert = severity_label in ["High", "Critical"]
+
+        # Build the response
         response = {
-            'alert': alert,
-            'prediction': prediction,
-            'severity': severity,
-            'probabilities': probabilities.tolist()
+            "timestamp": data["timestamp"],
+            "source_ip": data["source_ip"],
+            "destination_ip": data["destination_ip"],
+            "protocol": data["protocol"],
+            "predicted_class": int(y_pred[0]),
+            "severity": severity_label,
+            "alert": alert,
+            "probabilities": y_prob.tolist()[0]
         }
-        return jsonify(response), 200
+        return jsonify(response)
 
     except Exception as e:
-        logger.error(f"Error in /detect endpoint: {e}")
-        return jsonify({'error': 'Internal server error.'}), 500
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/debug', methods=['POST'])
-def debug():
-    """
-    Debug endpoint to return detailed model probability scores.
-    This is similar to /detect but explicitly returns the probability distribution.
-    """
-    try:
-        data = request.get_json(force=True)
-        required_fields = ['timestamp', 'source_ip', 'destination_ip', 'protocol', 'features']
-        if not all(field in data for field in required_fields):
-            logger.warning("Missing one or more required fields in debug endpoint.")
-            return jsonify({'error': 'Invalid input format, missing fields.'}), 400
-
-        # Validate timestamp
-        try:
-            datetime.fromisoformat(data['timestamp'])
-        except Exception as e:
-            logger.warning(f"Timestamp error in debug endpoint: {e}")
-            return jsonify({'error': 'Invalid timestamp format.'}), 400
-
-        # Process features (raw features)
-        features = data.get('features')
-        if not isinstance(features, list) or not all(isinstance(x, (int, float)) for x in features):
-            logger.warning("Features are not a valid numeric list in debug endpoint.")
-            return jsonify({'error': 'Invalid features format. Must be a list of numbers.'}), 400
-
-        raw_features = np.array(features).reshape(1, -1)
-        expected_feature_count = len(original_feature_columns)
-        if raw_features.shape[1] != expected_feature_count:
-            return jsonify({'error': f'Expected {expected_feature_count} features, got {raw_features.shape[1]}.'}), 400
-
-        raw_df = pd.DataFrame(raw_features, columns=original_feature_columns)
-
-        # Get prediction probabilities and predicted class
-        probabilities = model.predict_proba(raw_df)[0]
-        prediction = int(model.predict(raw_df)[0])
-        severity = severity_mapping.get(prediction, 'Unknown')
-        alert = severity in ['High', 'Critical']
-
-        debug_info = {
-            'prediction': prediction,
-            'severity': severity,
-            'probabilities': probabilities.tolist()
-        }
-        return jsonify(debug_info), 200
-
-    except Exception as e:
-        logger.error(f"Error in /debug endpoint: {e}")
-        return jsonify({'error': 'Internal server error in debug endpoint.'}), 500
-
-@app.route('/update-model', methods=['POST'])
-def update_model():
-    """
-    Endpoint to reload/update the model, scaler, and feature names.
-    This allows you to update the model without restarting the server.
-    """
-    try:
-        global model, scaler, original_feature_columns
-        model, scaler, original_feature_columns = load_model_and_scaler()
-        if model is None or scaler is None or original_feature_columns is None:
-            return jsonify({'error': 'Failed to update model.'}), 500
-        return jsonify({'message': 'Model updated successfully.'}), 200
-    except Exception as e:
-        logger.error(f"Error in /update-model endpoint: {e}")
-        return jsonify({'error': 'Internal server error during model update.'}), 500
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "OK"}), 200
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # For development use only; in production, use a production-ready WSGI server.
+    app.run(host='0.0.0.0', port=5000, debug=True)
