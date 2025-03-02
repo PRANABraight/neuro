@@ -5,6 +5,8 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import json
+import logging
+from datetime import datetime
 
 app = Flask(__name__)
 
