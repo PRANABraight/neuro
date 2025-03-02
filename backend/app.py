@@ -104,4 +104,4 @@ def health():
 
 if __name__ == '__main__':
     # Use a production-ready WSGI server in production.
-    app.run(host='172.17.144.1:3000', port=5000, debug=True)
+    app.run(host='127.0.0.1', port=5000, debug=True)
