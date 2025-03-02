@@ -1,31 +1,35 @@
+# app.py
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # <-- Import CORS
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-import json
-import logging
 from datetime import datetime
+import logging
 
 app = Flask(__name__)
+CORS(app, resources={r"/detect": {"origins": "http://localhost:3000"}, r"/health": {"origins": "http://localhost:3000"}})
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Load the tuned pipeline (which includes preprocessing and the LightGBM classifier)
+# Load the tuned pipeline (including preprocessing and LightGBM classifier)
 model = joblib.load('tuned_model_cicids_lightgbm.pkl')
-# Load the fitted numerical scaler (if you need it separately for any reason)
+
+# (Optional) Load the scaler if you need to apply it separately
 scaler = joblib.load('tuned_scaler_cicids.pkl')
-# Load original feature column names for inference
+
+# Load the original feature columns used during training
 original_feature_columns = joblib.load('original_feature_columns.pkl')
 
-# Custom threshold for class 3; adjust as needed
+# Define custom thresholds (for example, adjusting the probability for class 3)
 CUSTOM_THRESHOLDS = {3: 0.22}
 
 def custom_predict_with_thresholds(probabilities, thresholds):
     """
     Apply custom thresholds for specific classes.
-    By default, predictions are taken as argmax of the probabilities.
-    For each class in thresholds, if the predicted probability is at or above the threshold,
-    the prediction is forced to that class.
+    Default prediction is argmax of probabilities. For each specified class,
+    if the predicted probability is at or above its threshold, that class is forced.
     """
     adjusted_preds = np.argmax(probabilities, axis=1)
     for class_label, threshold in thresholds.items():
@@ -37,19 +41,17 @@ def custom_predict_with_thresholds(probabilities, thresholds):
 def detect():
     """
     Expects a JSON payload with:
-    - timestamp (ISO format string)
-    - source_ip (string)
-    - destination_ip (string)
-    - protocol (string)
-    - features: a list of raw feature values (length should match original_feature_columns)
+      - timestamp (ISO format string)
+      - source_ip (string)
+      - destination_ip (string)
+      - protocol (string)
+      - features: a list of raw feature values (must match the length of original_feature_columns)
     
     Returns:
-        JSON with predicted severity, probabilities, and alert flag.
+      A JSON object with predicted class, severity label, alert flag, and probabilities.
     """
     try:
         data = request.get_json()
-
-        # Validate input keys
         required_keys = ['timestamp', 'source_ip', 'destination_ip', 'protocol', 'features']
         if not all(key in data for key in required_keys):
             return jsonify({"error": "Invalid input format. Missing required keys."}), 400
@@ -61,25 +63,23 @@ def detect():
                 "error": f"Expected {len(original_feature_columns)} features, got {len(features)}."
             }), 400
 
-        # Create a DataFrame from the incoming features so that the pipeline can process it
-        # The column names must match those used during training.
+        # Create a DataFrame from the incoming features (ensure the column names match the training data)
         input_df = pd.DataFrame([features], columns=original_feature_columns)
 
-        # If you need to apply any additional transformations (like log transforms) that were applied during training,
-        # make sure they are included in your pipeline. Here we assume that the pipeline handles all transformations.
-        # Predict probabilities
+        # Predict probability distribution
         y_prob = model.predict_proba(input_df)
-        # Use custom threshold calibration for class 3
+
+        # Apply custom threshold calibration
         y_pred = custom_predict_with_thresholds(y_prob, CUSTOM_THRESHOLDS)
 
-        # Map prediction to severity label (0: Low, 1: Medium, 2: High, 3: Critical)
+        # Define severity mapping (0: Low, 1: Medium, 2: High, 3: Critical)
         severity_mapping = {0: "Low", 1: "Medium", 2: "High", 3: "Critical"}
         severity_label = severity_mapping.get(int(y_pred[0]), "Unknown")
 
-        # Optionally, define an alert flag (for example, alert if severity is High or Critical)
+        # Set an alert flag if severity is High or Critical
         alert = severity_label in ["High", "Critical"]
 
-        # Build the response
+        # Build response payload
         response = {
             "timestamp": data["timestamp"],
             "source_ip": data["source_ip"],
@@ -90,15 +90,18 @@ def detect():
             "alert": alert,
             "probabilities": y_prob.tolist()[0]
         }
+
         return jsonify(response)
 
     except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
+    """Simple health check endpoint."""
     return jsonify({"status": "OK"}), 200
 
 if __name__ == '__main__':
-    # For development use only; in production, use a production-ready WSGI server.
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Use a production-ready WSGI server in production.
+    app.run(host='172.17.144.1:3000', port=5000, debug=True)
