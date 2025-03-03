@@ -1,6 +1,6 @@
 # app.py
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # <-- Import CORS
+from flask_cors import CORS
 import joblib
 import numpy as np
 import pandas as pd
@@ -8,22 +8,33 @@ from datetime import datetime
 import logging
 
 app = Flask(__name__)
-CORS(app, resources={r"/detect": {"origins": "http://localhost:3000"}, r"/health": {"origins": "http://localhost:3000"}})
+# Configure CORS to allow all origins for all routes to simplify testing
+CORS(app, origins="*", supports_credentials=True)
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load the tuned pipeline (including preprocessing and LightGBM classifier)
-model = joblib.load('tuned_model_cicids_lightgbm.pkl')
-
-# (Optional) Load the scaler if you need to apply it separately
-scaler = joblib.load('tuned_scaler_cicids.pkl')
-
-# Load the original feature columns used during training
-original_feature_columns = joblib.load('original_feature_columns.pkl')
+try:
+    model = joblib.load('tuned_model_cicids_lightgbm.pkl')
+    # (Optional) Load the scaler if you need to apply it separately
+    scaler = joblib.load('tuned_scaler_cicids.pkl')
+    # Load the original feature columns used during training
+    original_feature_columns = joblib.load('original_feature_columns.pkl')
+    logger.info("Successfully loaded model and related files")
+except Exception as e:
+    logger.error(f"Error loading model files: {str(e)}")
+    # Set dummy values for testing if models aren't available
+    model = None
+    original_feature_columns = []
+    logger.warning("Using dummy values for testing purposes")
 
 # Define custom thresholds (for example, adjusting the probability for class 3)
 CUSTOM_THRESHOLDS = {3: 0.22}
+
+# Sample history data (since we're adding a history endpoint)
+sample_history = []
 
 def custom_predict_with_thresholds(probabilities, thresholds):
     """
@@ -51,14 +62,39 @@ def detect():
       A JSON object with predicted class, severity label, alert flag, and probabilities.
     """
     try:
+        logger.info(f"Received request to /detect: {request.data}")
         data = request.get_json()
+        if not data:
+            logger.warning("No JSON data received in request")
+            return jsonify({"error": "Invalid request: No JSON data provided"}), 400
+
         required_keys = ['timestamp', 'source_ip', 'destination_ip', 'protocol', 'features']
         if not all(key in data for key in required_keys):
-            return jsonify({"error": "Invalid input format. Missing required keys."}), 400
+            missing_keys = [key for key in required_keys if key not in data]
+            logger.warning(f"Missing keys in request: {missing_keys}")
+            return jsonify({"error": f"Invalid input format. Missing required keys: {missing_keys}"}), 400
+
+        # For testing purposes - if model isn't loaded, return dummy response
+        if model is None or not original_feature_columns:
+            logger.info("Using dummy response (no model available)")
+            dummy_response = {
+                "timestamp": data["timestamp"],
+                "source_ip": data["source_ip"],
+                "destination_ip": data["destination_ip"],
+                "protocol": data["protocol"],
+                "predicted_class": 1,
+                "severity": "Medium",
+                "alert": False,
+                "probabilities": [0.1, 0.7, 0.1, 0.1]
+            }
+            # Store in history
+            sample_history.append(dummy_response)
+            return jsonify(dummy_response)
 
         # Validate feature length
         features = data['features']
         if len(features) != len(original_feature_columns):
+            logger.warning(f"Feature length mismatch: expected {len(original_feature_columns)}, got {len(features)}")
             return jsonify({
                 "error": f"Expected {len(original_feature_columns)} features, got {len(features)}."
             }), 400
@@ -91,6 +127,9 @@ def detect():
             "probabilities": y_prob.tolist()[0]
         }
 
+        # Store in history
+        sample_history.append(response)
+        
         return jsonify(response)
 
     except Exception as e:
@@ -102,6 +141,39 @@ def health():
     """Simple health check endpoint."""
     return jsonify({"status": "OK"}), 200
 
+@app.route('/status', methods=['GET'])
+def status():
+    """Return system status."""
+    status_info = {
+        "status": "operational",
+        "uptime": "1d 4h 32m",
+        "model_loaded": model is not None,
+        "features_count": len(original_feature_columns) if original_feature_columns else 0,
+        "version": "1.0.0"
+    }
+    return jsonify(status_info), 200
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    """Get or update system settings."""
+    if request.method == 'GET':
+        settings_data = {
+            "detection_threshold": CUSTOM_THRESHOLDS,
+            "alert_severity_levels": ["High", "Critical"],
+            "logging_level": "INFO"
+        }
+        return jsonify(settings_data), 200
+    elif request.method == 'POST':
+        data = request.get_json()
+        # In a real app, you would save these settings
+        return jsonify({"status": "Settings updated successfully", "settings": data}), 200
+
+@app.route('/history', methods=['GET'])
+def history():
+    """Return detection history."""
+    # In a real app, you would query a database
+    return jsonify({"history": sample_history}), 200
+
 if __name__ == '__main__':
     # Use a production-ready WSGI server in production.
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

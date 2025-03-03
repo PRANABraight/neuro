@@ -1,0 +1,11 @@
+# Required Python packages for network intrusion detection system
+Flask==3.1
+flask-cors==5.0.1
+joblib==1.2.0 
+numpy==2.2.3
+pandas==2.2.3
+scikit-learn==1.6.1
+lightgbm==4.6.0
+python-dateutil==2.9.0.post0
+pytz==2025.1
+gunicorn==23.0.0
